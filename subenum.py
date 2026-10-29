@@ -14,11 +14,13 @@ Uso:
 import argparse
 import html
 import os
+import random
 import re
 import shutil
+import string
 import subprocess
 import sys
-from collections import defaultdict
+from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -96,6 +98,96 @@ def check_bins(required):
         sys.exit(1)
 
 
+def random_label(length=12):
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+
+def parse_dnsx_output(lines):
+    results = defaultdict(lambda: {"A": [], "AAAA": [], "CNAME": []})
+    pattern = re.compile(r"^([^\s]+)\s+\[(.+)\]$")
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        match = pattern.match(line)
+        if not match:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].startswith("["):
+                host = parts[0]
+                values = " ".join(parts[1:]).strip("[]")
+                for value in re.split(r"[,]\s*", values):
+                    value = value.strip()
+                    if ":" in value and "." not in value:
+                        results[host]["AAAA"].append(value)
+                    elif re.match(r"^\d+\.\d+\.\d+\.\d+$", value):
+                        results[host]["A"].append(value)
+                    else:
+                        results[host]["CNAME"].append(value)
+            continue
+
+        host, records = match.groups()
+        host = host.lower().rstrip(".")
+
+        for record in re.split(r",\s*", records):
+            record = record.strip()
+            if not record:
+                continue
+
+            parts = record.split()
+            if len(parts) >= 2 and parts[0].upper() in ("A", "AAAA", "CNAME"):
+                rtype = parts[0].upper()
+                value = parts[1]
+            else:
+                value = record
+                if re.match(r"^\d+\.\d+\.\d+\.\d+$", value):
+                    rtype = "A"
+                elif ":" in value and "." not in value:
+                    rtype = "AAAA"
+                else:
+                    rtype = "CNAME"
+
+            if value not in results[host][rtype]:
+                results[host][rtype].append(value)
+
+    return dict(results)
+
+
+def dnsx_resolve(subs, outfile, resolvers=None, threads=50):
+    if not subs:
+        return {}
+    cmd = ["dnsx", "-silent", "-a", "-aaaa", "-cname", "-resp", "-t", str(threads), "-o", outfile]
+    if resolvers and Path(resolvers).exists():
+        cmd += ["-r", resolvers]
+    run(cmd, stdin_data="\n".join(subs))
+    return parse_dnsx_output(read_lines(outfile))
+
+
+def detect_wildcards(domain, outdir, resolvers=None, threads=50, probes=8):
+    print(f"[*] Detectando wildcards con {probes} subdominios aleatorios...")
+    probes_hosts = [f"{random_label()}.{domain}" for _ in range(probes)]
+    outfile = outdir / "wildcard_probes.txt"
+    results = dnsx_resolve(probes_hosts, str(outfile), resolvers, threads)
+
+    ip_counter = Counter()
+    for data in results.values():
+        ips = set(data.get("A", []) + data.get("AAAA", []))
+        ip_counter.update(ips)
+
+    wildcard_ips = {ip for ip, count in ip_counter.items() if count >= 2}
+    write_lines(outdir / "04_wildcards.txt", wildcard_ips)
+
+    if wildcard_ips:
+        print(f"[!] Wildcards detectados: {len(wildcard_ips)} IP(s)")
+        for ip in sorted(wildcard_ips):
+            print(f"    - {ip}")
+    else:
+        print("[+] No se han detectado wildcards.")
+
+    return wildcard_ips
+
+
 def shodan_enum(domain, api_key, outfile):
     if not api_key:
         print("[*] Shodan: sin API key, se omite.")
@@ -165,58 +257,6 @@ def gotator_permutations(subs, outfile, perm_file=None, depth=1, numbers=3):
     return perms
 
 
-def parse_dnsx_output(lines):
-    results = defaultdict(lambda: {"A": [], "AAAA": [], "CNAME": []})
-    pattern = re.compile(r"^([^\s]+)\s+\[(.+)\]$")
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        match = pattern.match(line)
-        if not match:
-            parts = line.split()
-            if len(parts) >= 2 and parts[1].startswith("["):
-                host = parts[0]
-                values = " ".join(parts[1:]).strip("[]")
-                for value in re.split(r"[,]\s*", values):
-                    value = value.strip()
-                    if ":" in value and "." not in value:
-                        results[host]["AAAA"].append(value)
-                    elif re.match(r"^\d+\.\d+\.\d+\.\d+$", value):
-                        results[host]["A"].append(value)
-                    else:
-                        results[host]["CNAME"].append(value)
-            continue
-
-        host, records = match.groups()
-        host = host.lower().rstrip(".")
-
-        for record in re.split(r",\s*", records):
-            record = record.strip()
-            if not record:
-                continue
-
-            parts = record.split()
-            if len(parts) >= 2 and parts[0].upper() in ("A", "AAAA", "CNAME"):
-                rtype = parts[0].upper()
-                value = parts[1]
-            else:
-                value = record
-                if re.match(r"^\d+\.\d+\.\d+\.\d+$", value):
-                    rtype = "A"
-                elif ":" in value and "." not in value:
-                    rtype = "AAAA"
-                else:
-                    rtype = "CNAME"
-
-            if value not in results[host][rtype]:
-                results[host][rtype].append(value)
-
-    return dict(results)
-
-
 def dnsx_validate(subs, outfile, resolvers=None, threads=50):
     if not subs:
         return {}, []
@@ -236,7 +276,21 @@ def whois_lookup(domain, outfile):
     return out
 
 
-def generate_html_report(domain, outdir, passive, candidates, dns_results, resolved_hosts):
+def split_wildcard_results(dns_results, wildcard_ips):
+    valid = {}
+    wildcard_candidates = {}
+
+    for host, data in dns_results.items():
+        ips = set(data.get("A", []) + data.get("AAAA", []))
+        if ips & wildcard_ips:
+            wildcard_candidates[host] = data
+        else:
+            valid[host] = data
+
+    return valid, wildcard_candidates
+
+
+def generate_html_report(domain, outdir, passive, candidates, dns_results, resolved_hosts, wildcard_ips, wildcard_candidates):
     ip_to_hosts = defaultdict(list)
     host_rows = []
 
@@ -272,7 +326,7 @@ def generate_html_report(domain, outdir, passive, candidates, dns_results, resol
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SENHER - {html.escape(domain)}</title>
 <style>
-:root {{ --bg:#0b1020; --card:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#22d3ee; --green:#34d399; --yellow:#fbbf24; }}
+:root {{ --bg:#0b1020; --card:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#22d3ee; --green:#34d399; --yellow:#fbbf24; --red:#f87171; }}
 * {{ box-sizing:border-box; }}
 body {{ margin:0; font-family:Inter,Arial,sans-serif; background:var(--bg); color:var(--text); }}
 .container {{ max-width:1200px; margin:0 auto; padding:32px 20px 64px; }}
@@ -291,6 +345,7 @@ tr:hover td {{ background:#0f172a; }}
 .badge {{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:.72rem; font-weight:700; }}
 .badge.passive {{ background:rgba(52,211,153,.15); color:var(--green); }}
 .badge.perm {{ background:rgba(251,191,36,.15); color:var(--yellow); }}
+.badge.wildcard {{ background:rgba(248,113,113,.15); color:var(--red); }}
 .ip {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--accent); }}
 .host {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }}
 .empty {{ color:var(--muted); font-style:italic; }}
@@ -309,6 +364,8 @@ a:hover {{ text-decoration:underline; }}
     <div class="card"><div class="value">{len(candidates)}</div><div class="label">Permutaciones candidatas</div></div>
     <div class="card"><div class="value">{len(resolved_hosts)}</div><div class="label">Hosts DNS validos</div></div>
     <div class="card"><div class="value">{len(ip_to_hosts)}</div><div class="label">IPs unicas</div></div>
+    <div class="card"><div class="value">{len(wildcard_ips)}</div><div class="label">IPs wildcard</div></div>
+    <div class="card"><div class="value">{len(wildcard_candidates)}</div><div class="label">Posibles falsos positivos</div></div>
   </div>
 
   <div class="section">
@@ -358,6 +415,29 @@ a:hover {{ text-decoration:underline; }}
       </tbody>
     </table>
   </div>
+'''
+
+    html += f'''
+  <div class="section">
+    <h2>Filtro de wildcards</h2>
+    <p>IPs que resolvieron en varias sondas aleatorias y se han excluido de los resultados validos.</p>
+'''
+
+    if not wildcard_ips:
+        html += '<p class="empty">No se han detectado wildcards.</p>'
+    else:
+        html += '<table><thead><tr><th>IP wildcard</th><th>Subdominios afectados</th></tr></thead><tbody>'
+        for ip in sorted(wildcard_ips):
+            affected = sorted(
+                host for host, data in wildcard_candidates.items()
+                if ip in data.get("A", []) + data.get("AAAA", [])
+            )
+            hosts_text = "<br>".join(html.escape(h) for h in affected) or '<span class="empty">-</span>'
+            html += f'<tr><td class="ip">{html.escape(ip)}</td><td>{hosts_text}</td></tr>'
+        html += '</tbody></table>'
+
+    html += '''
+  </div>
 
   <div class="footer">Generado por SENHER - Uso exclusivo en activos autorizados.</div>
 </div>
@@ -370,7 +450,7 @@ a:hover {{ text-decoration:underline; }}
     return report_path
 
 
-def generate_markdown_report(domain, outdir, passive, candidates, dns_results, resolved_hosts):
+def generate_markdown_report(domain, outdir, passive, candidates, dns_results, resolved_hosts, wildcard_ips, wildcard_candidates):
     report = outdir / "REPORT.md"
     with open(report, "w", encoding="utf-8") as r:
         r.write(f"# Recon de subdominios: {domain}\n\n")
@@ -378,12 +458,15 @@ def generate_markdown_report(domain, outdir, passive, candidates, dns_results, r
         r.write(f"- Subdominios pasivos: {len(passive)}\n")
         r.write(f"- Permutaciones candidatas: {len(candidates)}\n")
         r.write(f"- Hosts DNS validos: {len(resolved_hosts)}\n")
+        r.write(f"- IPs wildcard detectadas: {len(wildcard_ips)}\n")
+        r.write(f"- Posibles falsos positivos: {len(wildcard_candidates)}\n")
         r.write(f"- Informe HTML: report.html\n\n")
+
         r.write("## Subdominios validos\n\n```text\n")
         r.write("\n".join(resolved_hosts))
         r.write("\n```\n\n")
-        r.write("## Resolucion por IP\n\n")
 
+        r.write("## Resolucion por IP\n\n")
         ip_map = defaultdict(list)
         for host, data in dns_results.items():
             for ip in data.get("A", []) + data.get("AAAA", []):
@@ -394,6 +477,20 @@ def generate_markdown_report(domain, outdir, passive, candidates, dns_results, r
             for host in sorted(ip_map[ip]):
                 r.write(f"- {host}\n")
             r.write("\n")
+
+        r.write("## Wildcards detectados\n\n")
+        if wildcard_ips:
+            for ip in sorted(wildcard_ips):
+                r.write(f"- `{ip}`\n")
+        else:
+            r.write("No se han detectado wildcards.\n")
+
+        r.write("\n## Posibles falsos positivos\n\n")
+        if wildcard_candidates:
+            for host in sorted(wildcard_candidates.keys()):
+                r.write(f"- {host}\n")
+        else:
+            r.write("No hay posibles falsos positivos por wildcard.\n")
 
     return report
 
@@ -408,6 +505,8 @@ def main():
     parser.add_argument("--perm-list", default=None, help="Wordlist para Gotator")
     parser.add_argument("--active", action="store_true", help="Habilita enumeracion activa")
     parser.add_argument("--threads", type=int, default=50)
+    parser.add_argument("--wildcard-probes", type=int, default=8, help="Numero de sondas aleatorias para detectar wildcards")
+    parser.add_argument("--skip-wildcard-check", action="store_true", help="Omite la deteccion de wildcards")
     parser.add_argument("--skip-amass", action="store_true")
     parser.add_argument("--skip-gau", action="store_true")
     parser.add_argument("--skip-permutations", action="store_true")
@@ -469,19 +568,40 @@ def main():
     write_lines(outdir / "02_permutations.txt", candidates)
     print(f"[+] Permutaciones nuevas: {len(candidates)}")
 
+    if args.skip_wildcard_check:
+        wildcard_ips = set()
+        print("[*] Deteccion de wildcards omitida.")
+    else:
+        wildcard_ips = detect_wildcards(domain, outdir, args.resolvers, args.threads, args.wildcard_probes)
+
     to_resolve = sorted(passive | candidates)
     f = outdir / "03_resolved.txt"
-    dns_results, resolved_hosts = dnsx_validate(to_resolve, str(f), args.resolvers, args.threads)
-    print(f"[+] Hosts que resuelven: {len(resolved_hosts)}")
+    dns_results, all_resolved = dnsx_validate(to_resolve, str(f), args.resolvers, args.threads)
+
+    valid_results, wildcard_candidates = split_wildcard_results(dns_results, wildcard_ips)
+    resolved_hosts = sorted(valid_results.keys())
+
+    write_lines(outdir / "05_wildcard_candidates.txt", wildcard_candidates.keys())
+
+    print(f"[+] Hosts que resuelven: {len(all_resolved)}")
+    print(f"[+] Hosts validos tras filtro wildcard: {len(resolved_hosts)}")
+    print(f"[!] Posibles falsos positivos por wildcard: {len(wildcard_candidates)}")
 
     whois_lookup(domain, str(outdir / "whois.txt"))
 
-    html_report = generate_html_report(domain, outdir, passive, candidates, dns_results, resolved_hosts)
-    md_report = generate_markdown_report(domain, outdir, passive, candidates, dns_results, resolved_hosts)
+    html_report = generate_html_report(
+        domain, outdir, passive, candidates, valid_results,
+        resolved_hosts, wildcard_ips, wildcard_candidates
+    )
+    md_report = generate_markdown_report(
+        domain, outdir, passive, candidates, valid_results,
+        resolved_hosts, wildcard_ips, wildcard_candidates
+    )
 
     print(f"\n[OK] Informe HTML: {html_report}")
     print(f"[OK] Informe Markdown: {md_report}")
     print(f"[OK] Subdominios validos: {outdir / '03_resolved.txt'}")
+    print(f"[OK] Posibles falsos positivos: {outdir / '05_wildcard_candidates.txt'}")
 
 
 if __name__ == "__main__":
