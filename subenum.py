@@ -6,9 +6,9 @@ Orquestador de enumeracion de subdominios para Kali Linux.
 Integra Subfinder, Amass, Shodan, GAU, AlterX, Gotator, dnsx y whois.
 
 Uso:
-  python3 subenum.py ejemplo.com --shodan-key XXXX
-  python3 subenum.py ejemplo.com --skip-amass --skip-gau
-  python3 subenum.py ejemplo.com --active --wordlist /ruta/words.txt
+  python3 subenum.py ejemplo.com
+  python3 subenum.py ejemplo.com --mode passive
+  python3 subenum.py ejemplo.com --mode active
 """
 
 import argparse
@@ -39,6 +39,8 @@ BANNER = r"""
   |____/ \___|_| |_|_| |_|\___|_|    
   Subdomain enumeration orchestrator
 """
+
+DEFAULT_ACTIVE_WORDLIST = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
 
 
 def run(cmd, outfile=None, stdin_data=None):
@@ -208,7 +210,7 @@ def shodan_enum(domain, api_key, outfile):
         return []
 
 
-def subfinder_enum(domain, outfile, active=False, wordlist=None):
+def subfinder_enum(domain, outfile, active=False):
     cmd = ["subfinder", "-d", domain, "-silent", "-o", outfile]
     if active:
         cmd += ["-active"]
@@ -217,9 +219,10 @@ def subfinder_enum(domain, outfile, active=False, wordlist=None):
 
 
 def amass_enum(domain, outfile, active=False, wordlist=None):
-    cmd = ["amass", "enum", "-passive", "-d", domain, "-o", outfile]
     if active and wordlist:
         cmd = ["amass", "enum", "-active", "-d", domain, "-brute", "-w", wordlist, "-o", outfile]
+    else:
+        cmd = ["amass", "enum", "-passive", "-d", domain, "-o", outfile]
     run(cmd)
     return read_lines(outfile)
 
@@ -290,7 +293,47 @@ def split_wildcard_results(dns_results, wildcard_ips):
     return valid, wildcard_candidates
 
 
-def generate_html_report(domain, outdir, passive, candidates, dns_results, resolved_hosts, wildcard_ips, wildcard_candidates):
+def choose_mode(requested_mode):
+    if requested_mode in ("passive", "active"):
+        return requested_mode
+
+    print("\nSelecciona el tipo de escaneo:")
+    print("  1) Pasivo - enumeracion pasiva completa, sin consultas activas")
+    print("  2) Activo - enumeracion pasiva completa + Subfinder activo + Amass brute force")
+
+    while True:
+        choice = input("Opcion [1/2]: ").strip()
+        if choice == "1":
+            return "passive"
+        if choice == "2":
+            return "active"
+        print("[!] Introduce 1 o 2.")
+
+
+def choose_wordlist(requested_wordlist):
+    if requested_wordlist and Path(requested_wordlist).exists():
+        return requested_wordlist
+
+    if requested_wordlist:
+        print(f"[!] Wordlist no encontrada: {requested_wordlist}")
+
+    print(f"\nWordlist por defecto: {DEFAULT_ACTIVE_WORDLIST}")
+
+    if Path(DEFAULT_ACTIVE_WORDLIST).exists():
+        use_default = input("Usar la wordlist por defecto? [S/n]: ").strip().lower()
+        if use_default in ("", "s", "si", "y", "yes"):
+            return DEFAULT_ACTIVE_WORDLIST
+    else:
+        print("[!] La wordlist por defecto no existe.")
+
+    while True:
+        path = input("Ruta de la wordlist para Amass: ").strip()
+        if path and Path(path).exists():
+            return path
+        print("[!] Ruta invalida o archivo inexistente.")
+
+
+def generate_html_report(domain, outdir, passive, candidates, dns_results, resolved_hosts, wildcard_ips, wildcard_candidates, mode):
     ip_to_hosts = defaultdict(list)
     host_rows = []
 
@@ -345,7 +388,7 @@ tr:hover td {{ background:#0f172a; }}
 .badge {{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:.72rem; font-weight:700; }}
 .badge.passive {{ background:rgba(52,211,153,.15); color:var(--green); }}
 .badge.perm {{ background:rgba(251,191,36,.15); color:var(--yellow); }}
-.badge.wildcard {{ background:rgba(248,113,113,.15); color:var(--red); }}
+.badge.mode {{ background:rgba(34,211,238,.15); color:var(--accent); }}
 .ip {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--accent); }}
 .host {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }}
 .empty {{ color:var(--muted); font-style:italic; }}
@@ -358,6 +401,7 @@ a:hover {{ text-decoration:underline; }}
 <div class="container">
   <h1>SENHER</h1>
   <div class="subtitle">Informe de enumeracion de subdominios para <strong>{html.escape(domain)}</strong> - {now}</div>
+  <div class="subtitle">Modo de escaneo: <span class="badge mode">{html.escape(mode.upper())}</span></div>
 
   <div class="cards">
     <div class="card"><div class="value">{len(passive)}</div><div class="label">Subdominios pasivos</div></div>
@@ -450,11 +494,12 @@ a:hover {{ text-decoration:underline; }}
     return report_path
 
 
-def generate_markdown_report(domain, outdir, passive, candidates, dns_results, resolved_hosts, wildcard_ips, wildcard_candidates):
+def generate_markdown_report(domain, outdir, passive, candidates, dns_results, resolved_hosts, wildcard_ips, wildcard_candidates, mode):
     report = outdir / "REPORT.md"
     with open(report, "w", encoding="utf-8") as r:
         r.write(f"# Recon de subdominios: {domain}\n\n")
         r.write(f"- Fecha: {datetime.now().isoformat(timespec='seconds')}\n")
+        r.write(f"- Modo: {mode}\n")
         r.write(f"- Subdominios pasivos: {len(passive)}\n")
         r.write(f"- Permutaciones candidatas: {len(candidates)}\n")
         r.write(f"- Hosts DNS validos: {len(resolved_hosts)}\n")
@@ -498,12 +543,12 @@ def generate_markdown_report(domain, outdir, passive, candidates, dns_results, r
 def main():
     parser = argparse.ArgumentParser(description="Enumeracion automatizada de subdominios")
     parser.add_argument("domain", help="Dominio objetivo, p. ej. ejemplo.com")
+    parser.add_argument("--mode", choices=["passive", "active"], help="Tipo de escaneo: passive o active")
     parser.add_argument("-k", "--shodan-key", default=os.getenv("SHODAN_API_KEY", ""))
     parser.add_argument("-o", "--output-dir", default=None)
     parser.add_argument("--resolvers", default="resolvers.txt")
-    parser.add_argument("--wordlist", default=None, help="Wordlist para Amass activo")
+    parser.add_argument("--wordlist", default=None, help="Wordlist para Amass en modo activo")
     parser.add_argument("--perm-list", default=None, help="Wordlist para Gotator")
-    parser.add_argument("--active", action="store_true", help="Habilita enumeracion activa")
     parser.add_argument("--threads", type=int, default=50)
     parser.add_argument("--wildcard-probes", type=int, default=8, help="Numero de sondas aleatorias para detectar wildcards")
     parser.add_argument("--skip-wildcard-check", action="store_true", help="Omite la deteccion de wildcards")
@@ -515,8 +560,15 @@ def main():
 
     print(BANNER)
     domain = args.domain.lower().strip()
+    mode = choose_mode(args.mode)
+
+    active_wordlist = None
+    if mode == "active":
+        active_wordlist = choose_wordlist(args.wordlist)
+        print(f"[*] Wordlist activa: {active_wordlist}")
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    outdir = Path(args.output_dir or f"output/{domain}_{stamp}")
+    outdir = Path(args.output_dir or f"output/{domain}_{mode}_{stamp}")
     outdir.mkdir(parents=True, exist_ok=True)
 
     required = ["subfinder", "dnsx", "alterx", "gotator", "whois"]
@@ -526,17 +578,25 @@ def main():
         required.append("gau")
     check_bins(required)
 
-    print(f"[*] Objetivo: {domain}")
+    print(f"\n[*] Objetivo: {domain}")
+    print(f"[*] Modo: {mode.upper()}")
     print(f"[*] Resultados: {outdir}\n")
 
     passive = set()
 
     f = outdir / "subfinder.txt"
-    passive.update(subfinder_enum(domain, str(f), active=args.active, wordlist=args.wordlist))
+    passive.update(subfinder_enum(domain, str(f), active=(mode == "active")))
 
     if not args.skip_amass:
         f = outdir / "amass.txt"
-        passive.update(amass_enum(domain, str(f), active=args.active, wordlist=args.wordlist))
+        passive.update(
+            amass_enum(
+                domain,
+                str(f),
+                active=(mode == "active"),
+                wordlist=active_wordlist if mode == "active" else None,
+            )
+        )
 
     if not args.skip_shodan:
         f = outdir / "shodan.txt"
@@ -591,11 +651,11 @@ def main():
 
     html_report = generate_html_report(
         domain, outdir, passive, candidates, valid_results,
-        resolved_hosts, wildcard_ips, wildcard_candidates
+        resolved_hosts, wildcard_ips, wildcard_candidates, mode
     )
     md_report = generate_markdown_report(
         domain, outdir, passive, candidates, valid_results,
-        resolved_hosts, wildcard_ips, wildcard_candidates
+        resolved_hosts, wildcard_ips, wildcard_candidates, mode
     )
 
     print(f"\n[OK] Informe HTML: {html_report}")
