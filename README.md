@@ -1,8 +1,6 @@
 # SENHER
 
-**SENHER** es una herramienta de enumeración y validación de subdominios para Kali Linux. Automatiza la recolección pasiva, la generación de permutaciones, la validación DNS y la generación de informes en HTML y Markdown.
-
-> ⚠️ **Uso responsable:** utiliza SENHER únicamente sobre dominios propios o para los que tengas autorización explícita. El autor no se hace responsable de usos indebidos.
+**SENHER** es una herramienta de enumeración y validación de subdominios para Kali Linux. Automatiza la recolección pasiva, activa, la generación de permutaciones, la validación DNS y la generación de informes en HTML y Markdown.
 
 ## Características
 
