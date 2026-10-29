@@ -43,10 +43,10 @@ BANNER = r"""
 DEFAULT_ACTIVE_WORDLIST = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
 
 
-def run(cmd, outfile=None, stdin_data=None):
+def run(cmd, outfile=None, stdin_data=None, timeout=None):
     print(f"[*] {' '.join(cmd)}")
     try:
-        p = subprocess.run(cmd, input=stdin_data, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.run(cmd, input=stdin_data, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         if p.returncode != 0:
             print(f"[!] Codigo {p.returncode}: {' '.join(cmd)}")
             if p.stderr:
@@ -57,6 +57,9 @@ def run(cmd, outfile=None, stdin_data=None):
         return p.stdout
     except FileNotFoundError:
         print(f"[!] Binario no encontrado: {cmd[0]}")
+        return ""
+    except subprocess.TimeoutExpired:
+        print(f"[!] Timeout ejecutando: {' '.join(cmd)}")
         return ""
 
 
@@ -251,12 +254,24 @@ def alterx_permutations(subs, domain, outfile, enrich=True):
 def gotator_permutations(subs, outfile, perm_file=None, depth=1, numbers=3):
     if not subs:
         return []
-    cmd = ["gotator", "-sub", "-", "-depth", str(depth), "-numbers", str(numbers), "-mindup", "-silent"]
+
+    input_file = Path(outfile).with_suffix(".input.txt")
+    input_file.write_text("\n".join(subs), encoding="utf-8")
+
+    cmd = [
+        "gotator",
+        "-sub", str(input_file),
+        "-depth", str(depth),
+        "-numbers", str(numbers),
+        "-mindup", "-silent"
+    ]
     if perm_file:
         cmd += ["-perm", perm_file]
-    out = run(cmd, stdin_data="\n".join(subs))
+
+    out = run(cmd)
     perms = extract_hosts(out, "")
     write_lines(outfile, perms)
+    input_file.unlink(missing_ok=True)
     return perms
 
 
@@ -273,7 +288,7 @@ def dnsx_validate(subs, outfile, resolvers=None, threads=50):
 
 
 def whois_lookup(domain, outfile):
-    out = run(["whois", domain])
+    out = run(["whois", domain], timeout=30)
     if out:
         Path(outfile).write_text(out, encoding="utf-8")
     return out
@@ -362,7 +377,7 @@ def generate_html_report(domain, outdir, passive, candidates, dns_results, resol
     sorted_ips = sorted(ip_to_hosts.keys(), key=lambda ip: (":" in ip, ip))
     now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
-    html = f"""<!DOCTYPE html>
+    html_content = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
@@ -417,19 +432,19 @@ a:hover {{ text-decoration:underline; }}
 """
 
     if not sorted_ips:
-        html += '<p class="empty">No se han resuelto IPs.</p>'
+        html_content += '<p class="empty">No se han resuelto IPs.</p>'
     else:
-        html += '<table><thead><tr><th>IP</th><th>Subdominios</th><th>Total</th></tr></thead><tbody>'
+        html_content += '<table><thead><tr><th>IP</th><th>Subdominios</th><th>Total</th></tr></thead><tbody>'
         for ip in sorted_ips:
             hosts = sorted(ip_to_hosts[ip])
             host_links = "<br>".join(
                 f'<span class="host"><a href="https://{html.escape(h)}" target="_blank" rel="noopener">{html.escape(h)}</a></span>'
                 for h in hosts
             )
-            html += f'<tr><td class="ip">{html.escape(ip)}</td><td>{host_links}</td><td>{len(hosts)}</td></tr>'
-        html += '</tbody></table>'
+            html_content += f'<tr><td class="ip">{html.escape(ip)}</td><td>{host_links}</td><td>{len(hosts)}</td></tr>'
+        html_content += '</tbody></table>'
 
-    html += '''
+    html_content += '''
   </div>
 
   <div class="section">
@@ -442,45 +457,45 @@ a:hover {{ text-decoration:underline; }}
 '''
 
     if not host_rows:
-        html += '<tr><td colspan="5" class="empty">No hay subdominios validos.</td></tr>'
+        html_content += '<tr><td colspan="5" class="empty">No hay subdominios validos.</td></tr>'
     else:
         for row in host_rows:
             source_class = "passive" if row["source"] == "Pasivo" else "perm"
             ipv4 = "<br>".join(f'<span class="ip">{html.escape(ip)}</span>' for ip in row["ipv4"]) or '<span class="empty">-</span>'
             ipv6 = "<br>".join(f'<span class="ip">{html.escape(ip)}</span>' for ip in row["ipv6"]) or '<span class="empty">-</span>'
             cname = "<br>".join(html.escape(c) for c in row["cname"]) or '<span class="empty">-</span>'
-            html += (
+            html_content += (
                 f'<tr><td class="host"><a href="https://{html.escape(row["host"])}" target="_blank" rel="noopener">{html.escape(row["host"])}</a></td>'
                 f'<td><span class="badge {source_class}">{row["source"]}</span></td>'
                 f'<td>{ipv4}</td><td>{ipv6}</td><td>{cname}</td></tr>'
             )
 
-    html += '''
+    html_content += '''
       </tbody>
     </table>
   </div>
 '''
 
-    html += f'''
+    html_content += f'''
   <div class="section">
     <h2>Filtro de wildcards</h2>
     <p>IPs que resolvieron en varias sondas aleatorias y se han excluido de los resultados validos.</p>
 '''
 
     if not wildcard_ips:
-        html += '<p class="empty">No se han detectado wildcards.</p>'
+        html_content += '<p class="empty">No se han detectado wildcards.</p>'
     else:
-        html += '<table><thead><tr><th>IP wildcard</th><th>Subdominios afectados</th></tr></thead><tbody>'
+        html_content += '<table><thead><tr><th>IP wildcard</th><th>Subdominios afectados</th></tr></thead><tbody>'
         for ip in sorted(wildcard_ips):
             affected = sorted(
                 host for host, data in wildcard_candidates.items()
                 if ip in data.get("A", []) + data.get("AAAA", [])
             )
             hosts_text = "<br>".join(html.escape(h) for h in affected) or '<span class="empty">-</span>'
-            html += f'<tr><td class="ip">{html.escape(ip)}</td><td>{hosts_text}</td></tr>'
-        html += '</tbody></table>'
+            html_content += f'<tr><td class="ip">{html.escape(ip)}</td><td>{hosts_text}</td></tr>'
+        html_content += '</tbody></table>'
 
-    html += '''
+    html_content += '''
   </div>
 
   <div class="footer">Generado por SENHER - Uso exclusivo en activos autorizados.</div>
@@ -490,7 +505,7 @@ a:hover {{ text-decoration:underline; }}
 '''
 
     report_path = outdir / "report.html"
-    report_path.write_text(html, encoding="utf-8")
+    report_path.write_text(html_content, encoding="utf-8")
     return report_path
 
 
