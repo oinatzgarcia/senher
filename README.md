@@ -1,6 +1,6 @@
 # SENHER
 
-**SENHER** es una herramienta de enumeración y validación de subdominios para Kali Linux. Automatiza la recolección pasiva, la generación de permutaciones, la validación DNS y la generación de un informe final.
+**SENHER** es una herramienta de enumeración y validación de subdominios para Kali Linux. Automatiza la recolección pasiva, la generación de permutaciones, la validación DNS y la generación de informes en HTML y Markdown.
 
 > ⚠️ **Uso responsable:** utiliza SENHER únicamente sobre dominios propios o para los que tengas autorización explícita. El autor no se hace responsable de usos indebidos.
 
@@ -12,7 +12,8 @@
 - Consulta WHOIS del dominio objetivo
 - Deduplicación automática y filtrado por scope
 - Resultados organizados por fecha en `output/`
-- Informe final en Markdown con los subdominios válidos
+- Informe visual en HTML con subdominios agrupados por IP
+- Informe técnico en Markdown con los subdominios válidos
 
 ## Flujo de trabajo
 
@@ -29,7 +30,7 @@ Subfinder + Amass + Shodan + GAU
        dnsx (validación DNS)
               |
               v
-     03_resolved.txt + REPORT.md
+ report.html + REPORT.md + 03_resolved.txt
 ```
 
 ## Requisitos
@@ -46,7 +47,7 @@ Subfinder + Amass + Shodan + GAU
 ```bash
 sudo apt update
 sudo apt install -y whois golang-go
-pip3 install shodan
+pip3 install -r requirements.txt
 ```
 
 ### Herramientas externas
@@ -154,7 +155,7 @@ python3 subenum.py ejemplo.com --skip-permutations
 
 ## Resolvers
 
-Crea un archivo `resolvers.txt` con servidores DNS, uno por línea:
+Crea o utiliza el archivo `resolvers.txt` incluido, con servidores DNS uno por línea:
 
 ```text
 1.1.1.1
@@ -162,6 +163,34 @@ Crea un archivo `resolvers.txt` con servidores DNS, uno por línea:
 8.8.8.8
 9.9.9.9
 ```
+
+## Informe HTML
+
+Al finalizar, SENHER genera automáticamente `report.html` dentro del directorio de resultados.
+
+```bash
+xdg-open output/ejemplo.com_*/report.html
+```
+
+El informe HTML incluye:
+
+- Resumen con el número de subdominios pasivos, permutaciones, hosts DNS válidos e IPs únicas
+- Tabla de **subdominios agrupados por IP**
+- Tabla de **detalle por subdominio**
+- Direcciones **IPv4**, **IPv6** y registros **CNAME**
+- Origen de cada host: pasivo o permutación
+- Enlaces directos a cada subdominio
+- Ordenación por IP y, después, alfabéticamente por subdominio
+
+### Ejemplo de agrupación
+
+| IP | Subdominios |
+|---|---|
+| `203.0.113.10` | `www.ejemplo.com`, `api.ejemplo.com` |
+| `203.0.113.25` | `mail.ejemplo.com` |
+| `2001:db8::10` | `cdn.ejemplo.com` |
+
+Esto permite identificar rápidamente infraestructura compartida, servidores con múltiples servicios y posibles relaciones entre subdominios.
 
 ## Resultados
 
@@ -179,7 +208,8 @@ output/ejemplo.com_20261029_120000/
 ├── 02_permutations.txt
 ├── 03_resolved.txt
 ├── whois.txt
-└── REPORT.md
+├── REPORT.md
+└── report.html
 ```
 
 | Archivo | Contenido |
@@ -187,7 +217,8 @@ output/ejemplo.com_20261029_120000/
 | `01_passive_all.txt` | Subdominios pasivos únicos |
 | `02_permutations.txt` | Permutaciones generadas |
 | `03_resolved.txt` | Subdominios con resolución DNS válida |
-| `REPORT.md` | Resumen final del reconocimiento |
+| `REPORT.md` | Informe técnico en Markdown con resolución por IP |
+| `report.html` | Informe visual en HTML con IPs y subdominios |
 
 ## Herramientas utilizadas
 
