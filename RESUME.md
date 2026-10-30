@@ -1,20 +1,24 @@
-# Parar y reanudar por fases (Kali/Linux)
+# Comando único: senher.py
+
+Los escaneos del punto de entrada principal crean checkpoints por defecto. Los demás archivos son módulos internos: consérvalos, pero no necesitas ejecutarlos.
 
 ```bash
 export SHODAN_API_KEY="TU_CLAVE"
-python3 senher_resume.py ejemplo.com --session-dir output/mi_sesion
-# Ctrl+C para detener
-python3 senher_resume.py --resume output/mi_sesion
+python3 senher.py ejemplo.com --session-dir output/mi_sesion
+# Ctrl+C para solicitar interrupción
+python3 senher.py --resume output/mi_sesion
 ```
 
-Ejecuta desde la misma carpeta de trabajo al reanudar. El lanzador conserva las opciones y elecciones interactivas, usa los módulos existentes de senher.py (crt.sh e informes incluidos) y no guarda la clave Shodan. No uses -k/--shodan-key; usa la variable de entorno. Utiliza --session-dir en lugar de -o.
+Sin --session-dir se crea una carpeta automática y se imprime su ruta. El mensaje interno aún puede mencionar senher_resume.py; senher.py --resume es equivalente. Ejecuta desde la misma carpeta de trabajo original. --resume recupera dominio, modo y opciones: no añadas otras opciones. Usa la variable de entorno para Shodan, no -k/--shodan-key, y --session-dir en lugar de -o/--output-dir.
 
-Se guardan checkpoints después de cada fase terminada. No se presupone éxito por existir un TXT vacío: un código de salida no cero o timeout del proceso externo detiene la ejecución y deja la fase pendiente. Al reanudar se comprueban hashes de los archivos guardados; si faltan o cambian se repite la fase. La comprobación es conservadora: puede repetir fases si han cambiado archivos previos. Se vuelve a generar el informe al final.
+La reanudación es por fases completadas, no por posición interna de cada herramienta. La fase interrumpida empieza de nuevo. No importa ejecuciones antiguas sin checkpoint.json. No borres resultados ni checkpoints. El gestor comprueba hashes y bloquea dos instancias sobre la misma sesión.
 
-La fase interrumpida se repite desde su principio, no desde una posición interna de Amass, dnsx o Gotator. La consulta crt.sh utiliza su caché independiente y puede repetirse si no quedó cacheada. La API Shodan puede devolver un error manejado por el módulo existente; el checkpoint conserva el resultado devuelto por ese módulo, por lo que un resultado vacío no garantiza que la API tuviera éxito. Estas limitaciones no se ocultan como reanudación por host.
+Regeneración HTML, sin consultas de red ni refiltrado wildcard:
 
-Ctrl+C detiene el proceso externo y su grupo; los procesos externos se ejecutan sin privilegios adicionales. Las permutaciones se serializan para que no escriban simultáneamente el estado. Un bloqueo de archivo impide ejecutar dos instancias en la misma sesión. No se recomienda detener con kill -9; aun así se conservan los checkpoints previamente escritos mediante reemplazo atómico. No se incluyen reintentos automáticos de fallos.
+```bash
+python3 senher.py --report-only output/directorio --domain ejemplo.com
+```
 
-No importa ejecuciones antiguas sin checkpoint.json. No cambies archivos de entrada, versiones de herramientas o código entre parada y reanudación; los hashes comprueban los resultados guardados, no congelan las dependencias ni el contenido de wordlists externas. La reanudación requiere las mismas herramientas instaladas. Un whois fallido detiene el flujo y queda pendiente, en lugar de marcarlo como completado.
+Limitaciones: esta integración no cambia el motor existente. Los hashes conservadores pueden repetir fases si cambian archivos previos. Las herramientas externas que fallan, incluido whois, detienen la sesión. Los errores de Shodan manejados por su módulo pueden quedar guardados como resultados vacíos. No cambies herramientas, código o entradas durante una sesión salvo para corregir un fallo conocido.
 
-Los modos pasivo/activo mantienen el comportamiento del programa existente: este cambio no convierte el modo passive en reconocimiento estrictamente pasivo.
+La interrupción durante permutaciones en hilos sigue pendiente de corrección y prueba: Ctrl+C puede esperar a que termine una tarea; no se garantiza parada inmediata en esa fase. Evita kill -9. Los checkpoints ya escritos se conservan. La separación estricta de modos también sigue pendiente: passive todavía hace validación DNS y sondas wildcard.
