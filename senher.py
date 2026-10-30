@@ -5,9 +5,11 @@ from pathlib import Path
 import subenum
 from dns_reporting import parse_dnsx_output, generate_html_report
 from crtsh_source import install
+from amass_compat import amass_enum
 
 subenum.parse_dnsx_output = parse_dnsx_output
 subenum.generate_html_report = generate_html_report
+subenum.amass_enum = amass_enum
 
 def main():
     options = argparse.ArgumentParser(add_help=False)
