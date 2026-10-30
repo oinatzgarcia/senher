@@ -101,8 +101,6 @@ También puedes pasarla directamente al ejecutar la herramienta:
 python3 subenum.py ejemplo.com --shodan-key "TU_API_KEY"
 ```
 
-> No incluyas la API key en el código ni la subas al repositorio.
-
 ## Uso
 
 ### Enumeración pasiva completa
